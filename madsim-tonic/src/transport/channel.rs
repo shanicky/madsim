@@ -13,6 +13,13 @@ use std::{
     time::Duration,
 };
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+#[cfg(any(
+    feature = "tls-native-roots",
+    feature = "tls-webpki-roots",
+    feature = "tls-ring",
+    feature = "tls-aws-lc"
+))]
+use tonic::transport::ClientTlsConfig;
 use tonic::{
     codegen::{http::HeaderValue, Bytes, StdError},
     transport::Uri,
@@ -69,6 +76,15 @@ impl Endpoint {
         }
     }
 
+    /// Sets the tower service default internal buffer size.
+    ///
+    /// Note: this setting is currently ignored by the madsim transport implementation.
+    pub fn buffer_size(self, sz: impl Into<Option<usize>>) -> Self {
+        // ignore this setting
+        let _ = sz.into();
+        self
+    }
+
     /// Create a channel from this config.
     pub async fn connect(&self) -> Result<Channel, Error> {
         if let Some(dur) = self.connect_timeout {
@@ -88,6 +104,23 @@ impl Endpoint {
             ep: MultiEndpoint::new_one(self.clone()),
             timeout: self.timeout,
         })
+    }
+
+    /// Create a channel that connects lazily.
+    ///
+    /// Note: madsim transport is not backed by a real HTTP/2 connection pool.
+    pub fn connect_lazy(&self) -> Channel {
+        Channel {
+            ep: MultiEndpoint::new_one(self.clone()),
+            timeout: self.timeout,
+        }
+    }
+
+    /// Create a channel that connects lazily using a custom connector.
+    ///
+    /// Note: the connector is currently ignored by the madsim transport implementation.
+    pub fn connect_with_connector_lazy<C>(&self, _connector: C) -> Channel {
+        self.connect_lazy()
     }
 
     /// Connect to a madsim Endpoint.
@@ -123,6 +156,20 @@ impl Endpoint {
     pub fn origin(self, _origin: Uri) -> Self {
         // ignore this setting
         self
+    }
+
+    /// Configures TLS for the endpoint.
+    ///
+    /// Note: TLS is currently ignored by the madsim transport implementation.
+    #[cfg(any(
+        feature = "tls-native-roots",
+        feature = "tls-webpki-roots",
+        feature = "tls-ring",
+        feature = "tls-aws-lc"
+    ))]
+    pub fn tls_config(self, _tls_config: ClientTlsConfig) -> Result<Self, Error> {
+        // ignore this setting
+        Ok(self)
     }
 
     /// Set whether TCP keepalive messages are enabled on accepted connections.
@@ -184,6 +231,59 @@ impl Endpoint {
     pub fn http2_adaptive_window(self, _enabled: bool) -> Self {
         // ignore this setting
         self
+    }
+
+    /// Sets the max size of received header frames.
+    ///
+    /// Note: this setting is currently ignored by the madsim transport implementation.
+    pub fn http2_max_header_list_size(self, size: u32) -> Self {
+        // ignore this setting
+        let _ = size;
+        self
+    }
+
+    /// Sets the executor used to spawn async tasks.
+    ///
+    /// Note: the executor is currently ignored by the madsim transport implementation.
+    pub fn executor<E>(self, _executor: E) -> Self
+    where
+        E: Clone + Send + Sync + 'static,
+    {
+        self
+    }
+
+    /// Sets the local address used when connecting.
+    ///
+    /// Note: the address is currently ignored by the madsim transport implementation.
+    pub fn local_address(self, addr: Option<std::net::IpAddr>) -> Self {
+        // ignore this setting
+        let _ = addr;
+        self
+    }
+
+    /// Get a reference to the configured URI.
+    pub fn uri(&self) -> &Uri {
+        &self.uri
+    }
+
+    /// Returns whether `TCP_NODELAY` is enabled.
+    ///
+    /// Note: this always returns `true` for API compatibility.
+    pub fn get_tcp_nodelay(&self) -> bool {
+        // We don't store this option; tonic defaults to true.
+        true
+    }
+
+    /// Returns the configured connect timeout.
+    pub fn get_connect_timeout(&self) -> Option<Duration> {
+        self.connect_timeout
+    }
+
+    /// Returns the configured TCP keepalive setting.
+    ///
+    /// Note: this always returns `None` for API compatibility.
+    pub fn get_tcp_keepalive(&self) -> Option<Duration> {
+        None
     }
 }
 
