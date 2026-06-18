@@ -2,6 +2,7 @@
 members = [
     "madsim",
     "madsim-aws-sdk-s3",
+    "madsim-io-uring",
     "madsim-macros",
     "madsim-tokio",
     "madsim-tonic",

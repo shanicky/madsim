@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## io-uring [0.1.0] - 2026-06-18
+
+### Added
+
+- New `madsim-io-uring` crate: a deterministic, in-memory simulator for the
+  low-level `io-uring` crate. Re-exports the real crate in normal builds and
+  simulates the ring under `--cfg madsim`. Supports `IoUring`/`Builder`,
+  submission/completion queues with `PushError` back-pressure, the `Nop`,
+  `Read`, `Write`, `Fsync`, and `Fallocate` opcodes, and buffer/file
+  registration. Ring I/O bridges to the simulated file system via descriptors
+  from `madsim::fs::File::as_raw_fd`.
+
+## madsim [0.2.35] - 2026-06-18
+
+### Added
+
+- `fs::File` now implements `AsRawFd`, handing out a node-local simulated
+  descriptor. New `fs::{read_at_fd, write_at_fd, fallocate_fd, fsync_fd}`
+  helpers resolve such a descriptor back to a file, allowing a raw `io-uring`
+  simulator to share the simulated file system.
+
+### Fixed
+
+- `fs::File::read_at` no longer underflows (panicking) when reading at or beyond
+  the end of a file; it now returns `Ok(0)`. `write_at` past the end now
+  zero-fills the gap instead of underflowing.
+
 ## tonic [0.6.0] tonic-build [0.6.0] - 2026-02-16
 
 ### Changed
