@@ -101,7 +101,7 @@ impl FsNodeHandle {
         })
     }
 
-    async fn create(&self, path: impl AsRef<Path>) -> Result<File> {
+    fn create_sync(&self, path: impl AsRef<Path>) -> Result<File> {
         let path = path.as_ref();
         trace!(?path, "create file");
         let mut fs = self.fs.lock();
@@ -116,6 +116,10 @@ impl FsNodeHandle {
             fds: self.fds.clone(),
             fd: Mutex::new(None),
         })
+    }
+
+    async fn create(&self, path: impl AsRef<Path>) -> Result<File> {
+        self.create_sync(path)
     }
 
     async fn metadata(&self, path: impl AsRef<Path>) -> Result<Metadata> {
@@ -266,6 +270,16 @@ impl File {
         handle.create(path).await
     }
 
+    /// Synchronous twin of [`create`](Self::create).
+    ///
+    /// The simulated file system performs no real I/O, so creation is a pure
+    /// in-memory operation. This lets synchronous code (such as a storage
+    /// backend exercised under `--cfg madsim`) open files without an async
+    /// context.
+    pub fn create_sync(path: impl AsRef<Path>) -> Result<File> {
+        FsNodeHandle::current().create_sync(path)
+    }
+
     /// Reads a number of bytes starting from a given offset.
     ///
     /// Reads that start at or beyond the end of the file return `Ok(0)`.
@@ -294,8 +308,12 @@ impl File {
     /// Truncates or extends the underlying file, updating the size of this file to become `size`.
     #[instrument]
     pub async fn set_len(&self, size: u64) -> Result<()> {
-        let mut data = self.inode.data.write();
-        data.resize(size as usize, 0);
+        self.set_len_sync(size)
+    }
+
+    /// Synchronous twin of [`set_len`](Self::set_len).
+    pub fn set_len_sync(&self, size: u64) -> Result<()> {
+        self.inode.data.write().resize(size as usize, 0);
         // TODO: random delay
         Ok(())
     }

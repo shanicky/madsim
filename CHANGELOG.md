@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   descriptor. New `fs::{read_at_fd, write_at_fd, fallocate_fd, fsync_fd}`
   helpers resolve such a descriptor back to a file, allowing a raw `io-uring`
   simulator to share the simulated file system.
+- `fs::File::create_sync` and `fs::File::set_len_sync`: synchronous twins of the
+  async constructors, so synchronous code (e.g. a storage backend under
+  `--cfg madsim`) can open and size files without an async context.
 
 ### Fixed
 
