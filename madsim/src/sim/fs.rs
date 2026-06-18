@@ -5,6 +5,7 @@ use std::{
     collections::HashMap,
     fmt,
     io::{Error, ErrorKind, Result},
+    os::fd::{AsRawFd, RawFd},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -68,12 +69,15 @@ impl FsSim {
 #[derive(Clone)]
 struct FsNodeHandle {
     fs: Arc<Mutex<HashMap<PathBuf, Arc<INode>>>>,
+    /// Maps simulated raw file descriptors to open inodes for this node.
+    fds: Arc<Mutex<FdTable>>,
 }
 
 impl FsNodeHandle {
     fn new() -> Self {
         FsNodeHandle {
             fs: Arc::new(Mutex::new(HashMap::new())),
+            fds: Arc::new(Mutex::new(FdTable::new())),
         }
     }
 
@@ -92,6 +96,8 @@ impl FsNodeHandle {
         Ok(File {
             inode,
             can_write: false,
+            fds: self.fds.clone(),
+            fd: Mutex::new(None),
         })
     }
 
@@ -107,6 +113,8 @@ impl FsNodeHandle {
         Ok(File {
             inode,
             can_write: true,
+            fds: self.fds.clone(),
+            fd: Mutex::new(None),
         })
     }
 
@@ -142,12 +150,97 @@ impl INode {
             len: self.data.read().len() as u64,
         }
     }
+
+    /// Reads bytes starting at `offset`, returning the number of bytes read.
+    /// Reads that start at or beyond the end of the file return `0`.
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> usize {
+        let data = self.data.read();
+        let offset = offset as usize;
+        if offset >= data.len() {
+            return 0;
+        }
+        let end = data.len().min(offset + buf.len());
+        let len = end - offset;
+        buf[..len].copy_from_slice(&data[offset..end]);
+        len
+    }
+
+    /// Writes `buf` starting at `offset`, zero-filling any gap before `offset`
+    /// and extending the file as needed.
+    fn write_at(&self, buf: &[u8], offset: u64) {
+        let mut data = self.data.write();
+        let offset = offset as usize;
+        if offset > data.len() {
+            data.resize(offset, 0);
+        }
+        let end = data.len().min(offset + buf.len());
+        let overlap = end - offset;
+        data[offset..end].copy_from_slice(&buf[..overlap]);
+        if overlap < buf.len() {
+            data.extend_from_slice(&buf[overlap..]);
+        }
+    }
+
+    /// Grows the file so that `offset + len` bytes are allocated, zero-filling
+    /// new space. Never shrinks the file.
+    fn fallocate(&self, offset: u64, len: u64) -> Result<()> {
+        let needed = offset
+            .checked_add(len)
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| Error::from_raw_os_error(libc::EFBIG))?;
+        let mut data = self.data.write();
+        if data.len() < needed {
+            data.resize(needed, 0);
+        }
+        Ok(())
+    }
+}
+
+/// Per-node table mapping simulated raw file descriptors to open inodes.
+///
+/// The raw `io-uring` simulator resolves the [`RawFd`] carried by a submission
+/// queue entry back to the in-memory inode through this table, so ring I/O
+/// shares the same files as the rest of [`mod@crate::fs`].
+struct FdTable {
+    next: RawFd,
+    map: HashMap<RawFd, FdEntry>,
+}
+
+struct FdEntry {
+    inode: Arc<INode>,
+    writable: bool,
+}
+
+impl FdTable {
+    fn new() -> Self {
+        // Start past the conventional stdio descriptors; the exact values are
+        // meaningful only to the simulator.
+        FdTable {
+            next: 3,
+            map: HashMap::new(),
+        }
+    }
+
+    fn register(&mut self, inode: Arc<INode>, writable: bool) -> RawFd {
+        let fd = self.next;
+        self.next += 1;
+        self.map.insert(fd, FdEntry { inode, writable });
+        fd
+    }
+
+    fn unregister(&mut self, fd: RawFd) {
+        self.map.remove(&fd);
+    }
 }
 
 /// A reference to an open file on the filesystem.
 pub struct File {
     inode: Arc<INode>,
     can_write: bool,
+    /// Node-local descriptor table this file's fd is registered in.
+    fds: Arc<Mutex<FdTable>>,
+    /// Lazily-allocated simulated descriptor, registered on first `as_raw_fd`.
+    fd: Mutex<Option<RawFd>>,
 }
 
 impl fmt::Debug for File {
@@ -174,12 +267,11 @@ impl File {
     }
 
     /// Reads a number of bytes starting from a given offset.
+    ///
+    /// Reads that start at or beyond the end of the file return `Ok(0)`.
     #[instrument(skip(buf), fields(len = buf.len()))]
     pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
-        let data = self.inode.data.read();
-        let end = data.len().min(offset as usize + buf.len());
-        let len = end - offset as usize;
-        buf[..len].copy_from_slice(&data[offset as usize..end]);
+        let len = self.inode.read_at(buf, offset);
         // TODO: random delay
         Ok(len)
     }
@@ -193,13 +285,7 @@ impl File {
                 "the file is read only",
             ));
         }
-        let mut data = self.inode.data.write();
-        let end = data.len().min(offset as usize + buf.len());
-        let len = end - offset as usize;
-        data[offset as usize..end].copy_from_slice(&buf[..len]);
-        if len < buf.len() {
-            data.extend_from_slice(&buf[len..]);
-        }
+        self.inode.write_at(buf, offset);
         // TODO: random delay
         // TODO: simulate buffer, write will not take effect until flush or close
         Ok(())
@@ -226,6 +312,39 @@ impl File {
     pub async fn metadata(&self) -> Result<Metadata> {
         Ok(self.inode.metadata())
     }
+
+    /// Registers (on first call) and returns this file's simulated descriptor.
+    fn sim_raw_fd(&self) -> RawFd {
+        let mut slot = self.fd.lock();
+        if let Some(fd) = *slot {
+            return fd;
+        }
+        let fd = self
+            .fds
+            .lock()
+            .register(self.inode.clone(), self.can_write);
+        *slot = Some(fd);
+        fd
+    }
+}
+
+/// Returns a simulated raw file descriptor.
+///
+/// The descriptor is registered in the node-local descriptor table on first use
+/// and stays valid until this `File` is dropped. It is meaningful only to the
+/// simulator (e.g. the raw `io-uring` simulator), not to the host OS.
+impl AsRawFd for File {
+    fn as_raw_fd(&self) -> RawFd {
+        self.sim_raw_fd()
+    }
+}
+
+impl Drop for File {
+    fn drop(&mut self) {
+        if let Some(fd) = *self.fd.lock() {
+            self.fds.lock().unregister(fd);
+        }
+    }
 }
 
 /// Read the entire contents of a file into a bytes vector.
@@ -241,6 +360,53 @@ pub async fn read(path: impl AsRef<Path>) -> Result<Vec<u8>> {
 pub async fn metadata(path: impl AsRef<Path>) -> Result<Metadata> {
     let handle = FsNodeHandle::current();
     handle.metadata(path).await
+}
+
+/// Looks up the inode registered for `fd` in the current node's table.
+fn inode_for_fd(fd: RawFd, need_write: bool) -> Result<Arc<INode>> {
+    let handle = FsNodeHandle::current();
+    let table = handle.fds.lock();
+    let entry = table
+        .map
+        .get(&fd)
+        .ok_or_else(|| Error::from_raw_os_error(libc::EBADF))?;
+    if need_write && !entry.writable {
+        return Err(Error::from_raw_os_error(libc::EBADF));
+    }
+    Ok(entry.inode.clone())
+}
+
+/// Reads from the file behind a simulated raw descriptor at `offset`.
+///
+/// This is the bridge used by the raw `io-uring` simulator to turn a `Read`
+/// submission queue entry into an in-memory file-system read. `fd` must have
+/// been obtained from [`File::as_raw_fd`] on the current node.
+pub fn read_at_fd(fd: RawFd, buf: &mut [u8], offset: u64) -> Result<usize> {
+    Ok(inode_for_fd(fd, false)?.read_at(buf, offset))
+}
+
+/// Writes to the file behind a simulated raw descriptor at `offset`, returning
+/// the number of bytes written.
+///
+/// This is the bridge used by the raw `io-uring` simulator to turn a `Write`
+/// submission queue entry into an in-memory file-system write. The descriptor
+/// must refer to a writable file.
+pub fn write_at_fd(fd: RawFd, buf: &[u8], offset: u64) -> Result<usize> {
+    inode_for_fd(fd, true)?.write_at(buf, offset);
+    Ok(buf.len())
+}
+
+/// Grows the file behind a simulated raw descriptor so that `offset + len`
+/// bytes are allocated. Used by the raw `io-uring` simulator's `Fallocate`.
+pub fn fallocate_fd(fd: RawFd, offset: u64, len: u64) -> Result<()> {
+    inode_for_fd(fd, true)?.fallocate(offset, len)
+}
+
+/// Validates that `fd` refers to an open file. Used by the raw `io-uring`
+/// simulator's `Fsync`, which is otherwise a no-op since data is never buffered.
+pub fn fsync_fd(fd: RawFd) -> Result<()> {
+    inode_for_fd(fd, false)?;
+    Ok(())
 }
 
 /// Metadata information about a file.
