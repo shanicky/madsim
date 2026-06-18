@@ -77,8 +77,9 @@ assert_eq!(cqe.result(), buf.len() as i32); // bytes written, or negated errno
 The simulation models the queue mechanics and per-operation results, not kernel
 internals:
 
-- Completions are produced in submission order; out-of-order completion is not
-  modeled.
+- Completions are returned in a deterministic, seed-dependent order that may
+  differ from submission order, mirroring how io_uring completes independent
+  operations out of order. Always pair completions back via `user_data`.
 - `setup_*` tuning (SQPOLL, IOPOLL, single-issuer, completion sizing, …) is
   accepted and ignored, except `setup_cqsize`.
 - Submitting executes operations synchronously, so there is no partial

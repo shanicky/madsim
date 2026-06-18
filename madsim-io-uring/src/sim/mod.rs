@@ -176,7 +176,15 @@ impl Inner {
             sq.drain(..).collect()
         };
         let n = entries.len();
-        let completions: Vec<cqueue::Entry> = entries.iter().map(|e| self.run(e)).collect();
+        let mut completions: Vec<cqueue::Entry> = entries.iter().map(|e| self.run(e)).collect();
+        // Real io_uring may complete independent operations out of order. Shuffle
+        // the completions with madsim's deterministic RNG so that consumers which
+        // (incorrectly) rely on submission order are caught, while keeping every
+        // seed perfectly reproducible. Completions are paired back via user_data.
+        {
+            use madsim::rand::{seq::SliceRandom, thread_rng};
+            completions.shuffle(&mut thread_rng());
+        }
         self.cq.lock().unwrap().extend(completions);
         Ok(n)
     }

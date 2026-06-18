@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   submission/completion queues with `PushError` back-pressure, the `Nop`,
   `Read`, `Write`, `Fsync`, and `Fallocate` opcodes, and buffer/file
   registration. Ring I/O bridges to the simulated file system via descriptors
-  from `madsim::fs::File::as_raw_fd`.
+  from `madsim::fs::File::as_raw_fd`. Completions are returned in a
+  deterministic, seed-dependent order to model out-of-order completion.
 
 ## madsim [0.2.35] - 2026-06-18
 

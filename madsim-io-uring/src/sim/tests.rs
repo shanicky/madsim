@@ -234,10 +234,13 @@ fn fsync_validates_descriptor() {
             ring.submission().push(&bad).unwrap();
         }
         ring.submit_and_wait(2).unwrap();
-        let first = ring.completion().next().unwrap();
-        let second = ring.completion().next().unwrap();
-        assert_eq!((first.user_data(), first.result()), (1, 0));
-        assert_eq!((second.user_data(), second.result()), (2, -libc::EBADF));
+        // Completions may arrive in any order; pair them back by user_data.
+        let mut results = std::collections::HashMap::new();
+        while let Some(cqe) = ring.completion().next() {
+            results.insert(cqe.user_data(), cqe.result());
+        }
+        assert_eq!(results[&1], 0);
+        assert_eq!(results[&2], -libc::EBADF);
     });
 }
 
@@ -322,4 +325,47 @@ fn deterministic_output() {
     }
 
     assert_eq!(scenario(), scenario());
+}
+
+/// The simulator models out-of-order completion: across seeds at least one run
+/// reaps completions in a non-submission order, and every run still yields the
+/// full set of completions (paired by user_data).
+#[test]
+fn completions_can_be_out_of_order() {
+    fn reap_order(seed: u64) -> Vec<u64> {
+        let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = out.clone();
+        let runtime = madsim::runtime::Runtime::with_seed_and_config(seed, madsim::Config::default());
+        let node = runtime.create_node().build();
+        let handle = node.spawn(async move {
+            let mut ring = IoUring::new(16).unwrap();
+            for i in 0..8u64 {
+                let entry = opcode::Nop::new().build().user_data(i);
+                unsafe { ring.submission().push(&entry).unwrap() };
+            }
+            ring.submit_and_wait(8).unwrap();
+            let mut v = sink.lock().unwrap();
+            while let Some(cqe) = ring.completion().next() {
+                v.push(cqe.user_data());
+            }
+        });
+        runtime.block_on(handle).unwrap();
+        std::sync::Arc::try_unwrap(out).unwrap().into_inner().unwrap()
+    }
+
+    let identity: Vec<u64> = (0..8).collect();
+    let mut any_reordered = false;
+    for seed in 0..32u64 {
+        let order = reap_order(seed);
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, identity, "all 8 completions must be present (seed {seed})");
+        if order != identity {
+            any_reordered = true;
+        }
+    }
+    assert!(
+        any_reordered,
+        "the simulator never reordered completions across 32 seeds"
+    );
 }
